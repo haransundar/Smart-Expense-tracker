@@ -1,0 +1,75 @@
+name: Deploy to Azure AKS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  ACR_NAME: expensetracker123
+  RESOURCE_GROUP: expense-tracker-rg
+  AKS_CLUSTER: expense-tracker-aks
+  NAMESPACE: expense-tracker
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Login to ACR
+      run: |
+        az acr login --name ${{ env.ACR_NAME }}
+
+    - name: Build and Push Backend Image
+      run: |
+        cd backend
+        docker build -f Dockerfile.prod -t ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-backend:${{ github.sha }} .
+        docker build -f Dockerfile.prod -t ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-backend:latest .
+        docker push ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-backend:${{ github.sha }}
+        docker push ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-backend:latest
+
+    - name: Build and Push Frontend Image
+      run: |
+        cd frontend
+        docker build -f Dockerfile.prod -t ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-frontend:${{ github.sha }} .
+        docker build -f Dockerfile.prod -t ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-frontend:latest .
+        docker push ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-frontend:${{ github.sha }}
+        docker push ${{ env.ACR_NAME }}.azurecr.io/expense-tracker-frontend:latest
+
+    - name: Set AKS Context
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.AKS_CLUSTER }}
+
+    - name: Deploy to AKS
+      run: |
+        # Update image tags
+        sed -i "s/<ACR_NAME>/${{ env.ACR_NAME }}/g" kubernetes/backend-deployment.yaml
+        sed -i "s/<ACR_NAME>/${{ env.ACR_NAME }}/g" kubernetes/frontend-deployment.yaml
+        
+        # Apply manifests
+        kubectl apply -f kubernetes/namespace.yaml
+        kubectl apply -f kubernetes/postgres-secret.yaml
+        kubectl apply -f kubernetes/backend-secret.yaml
+        kubectl apply -f kubernetes/postgres-pvc.yaml
+        kubectl apply -f kubernetes/postgres-deployment.yaml
+        kubectl apply -f kubernetes/backend-deployment.yaml
+        kubectl apply -f kubernetes/frontend-deployment.yaml
+        
+        # Wait for rollout
+        kubectl rollout status deployment/backend -n ${{ env.NAMESPACE }}
+        kubectl rollout status deployment/frontend -n ${{ env.NAMESPACE }}
+
+    - name: Get Service URL
+      run: |
+        kubectl get service frontend-service -n ${{ env.NAMESPACE }}
